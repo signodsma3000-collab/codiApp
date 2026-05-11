@@ -11,7 +11,4 @@
 -keep class com.swmansion.reanimated.** { *; }
 -keep class com.facebook.react.turbomodule.** { *; }
 
-# ZXing (native barcode bitmap generation)
--keep class com.google.zxing.** { *; }
-
 # Add any project specific keep options here:
