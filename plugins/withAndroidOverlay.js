@@ -22,6 +22,23 @@ function ensureService(manifest, serviceName, serviceAttrs) {
   app.service = services;
 }
 
+/** ZXing on compile classpath — Groovy and Kotlin DSL accept the same dependency line. */
+async function ensureZxingCoreDependency(gradlePath) {
+  if (!fs.existsSync(gradlePath)) {
+    return;
+  }
+  let text = await fs.promises.readFile(gradlePath, 'utf8');
+  if (/com\.google\.zxing\s*:\s*core/.test(text)) {
+    return;
+  }
+  const zxingLine = '    implementation("com.google.zxing:core:3.5.3")';
+  const next = text.replace(/dependencies\s*\{/, (m) => `${m}\n${zxingLine}`);
+  if (next === text) {
+    return;
+  }
+  await fs.promises.writeFile(gradlePath, next, 'utf8');
+}
+
 module.exports = function withAndroidOverlay(config) {
   config = withAndroidManifest(config, (config) => {
     const androidManifest = config.modResults;
@@ -124,18 +141,9 @@ module.exports = function withAndroidOverlay(config) {
         }
       }
 
-      const appGradlePath = path.join(projectRoot, 'android', 'app', 'build.gradle');
-      if (fs.existsSync(appGradlePath)) {
-        const zxingCoords = 'com.google.zxing:core:3.5.3';
-        let gradleText = await fs.promises.readFile(appGradlePath, 'utf8');
-        if (!gradleText.includes(zxingCoords)) {
-          gradleText = gradleText.replace(
-            /^dependencies\s*\{/m,
-            `dependencies {\n    implementation("${zxingCoords}")\n`,
-          );
-          await fs.promises.writeFile(appGradlePath, gradleText, 'utf8');
-        }
-      }
+      const appDir = path.join(projectRoot, 'android', 'app');
+      await ensureZxingCoreDependency(path.join(appDir, 'build.gradle'));
+      await ensureZxingCoreDependency(path.join(appDir, 'build.gradle.kts'));
 
       return cfg;
     },
