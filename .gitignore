@@ -38,6 +38,4 @@ yarn-error.*
 
 app-example
 
-# generated native folders
-/ios
-/android
+# Bare workflow: native android/ios must be tracked so EAS Build uploads them (do not list /android /ios here).
