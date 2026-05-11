@@ -156,7 +156,7 @@ android {
 }
 
 dependencies {
-    // ZXing core — BarcodeFormat, EncodeHintType, MultiFormatWriter, BitMatrix (OverlayService)
+    // ZXing Core (Maven Central): BarcodeFormat, EncodeHintType, MultiFormatWriter, BitMatrix — OverlayService
     implementation("com.google.zxing:core:3.5.3")
 
     // The version of react-native is set by the React Native Gradle Plugin

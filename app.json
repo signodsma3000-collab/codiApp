@@ -4,22 +4,28 @@
     "slug": "codiApp",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
+    "icon": "./assets/icon.png",
     "scheme": "codiapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.signo38.codiApp",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "CodiApp usa el micrófono para dictar la ubicación del almacén."
+      }
     },
     "android": {
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.signo38.codiApp"
     },
     "web": {
       "output": "static",
@@ -27,6 +33,7 @@
     },
     "plugins": [
       "expo-router",
+      "./plugins/withAndroidOverlay",
       [
         "expo-splash-screen",
         {
@@ -43,6 +50,12 @@
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "eae9560f-460e-4b4b-9df5-3ba5a99664b3"
+      }
     }
   }
 }
