@@ -39,6 +39,23 @@ async function ensureZxingCoreDependency(gradlePath) {
   await fs.promises.writeFile(gradlePath, next, 'utf8');
 }
 
+/** Register CodiOverlay native module (not npm-autolinked). */
+async function ensureCodiOverlayPackageRegistered(mainApplicationPath) {
+  if (!fs.existsSync(mainApplicationPath)) {
+    return;
+  }
+  let text = await fs.promises.readFile(mainApplicationPath, 'utf8');
+  if (/\badd\s*\(\s*CodiOverlayPackage\s*\(\s*\)\s*\)/.test(text)) {
+    return;
+  }
+  const marker = 'PackageList(this).packages.apply {';
+  if (!text.includes(marker)) {
+    return;
+  }
+  text = text.replace(marker, `${marker}\n              add(CodiOverlayPackage())`);
+  await fs.promises.writeFile(mainApplicationPath, text, 'utf8');
+}
+
 module.exports = function withAndroidOverlay(config) {
   config = withAndroidManifest(config, (config) => {
     const androidManifest = config.modResults;
@@ -144,6 +161,20 @@ module.exports = function withAndroidOverlay(config) {
       const appDir = path.join(projectRoot, 'android', 'app');
       await ensureZxingCoreDependency(path.join(appDir, 'build.gradle'));
       await ensureZxingCoreDependency(path.join(appDir, 'build.gradle.kts'));
+
+      const mainApplicationKt = path.join(
+        projectRoot,
+        'android',
+        'app',
+        'src',
+        'main',
+        'java',
+        'com',
+        'signo38',
+        'codiApp',
+        'MainApplication.kt',
+      );
+      await ensureCodiOverlayPackageRegistered(mainApplicationKt);
 
       return cfg;
     },

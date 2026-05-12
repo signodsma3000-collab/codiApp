@@ -7,6 +7,8 @@ export type CodiOverlayNative = {
   hideFloatingWindow(): Promise<boolean>;
   minimizeFloatingWindow(): Promise<boolean>;
   restoreFloatingWindow(): Promise<boolean>;
+  /** Sincroniza JSON del pull con SharedPreferences del overlay (Android). */
+  syncPullSnapshotJson(json: string | null): Promise<boolean>;
 };
 
 type NativeModulesShape = {

@@ -35,6 +35,13 @@
       "expo-router",
       "./plugins/withAndroidOverlay",
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "CODI APP accede a la galería para elegir una foto de la hoja de pull.",
+          "cameraPermission": "CODI APP usa la cámara para fotografiar la hoja de pull."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",

@@ -5,8 +5,11 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -29,12 +32,14 @@ import android.view.View.MeasureSpec
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
 import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -45,6 +50,8 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import com.google.zxing.common.BitMatrix
 import com.signo38.codiApp.R
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
@@ -56,6 +63,8 @@ class OverlayService : Service() {
     const val ACTION_HIDE = "com.signo38.codiApp.overlay.ACTION_HIDE"
     const val ACTION_MINIMIZE = "com.signo38.codiApp.overlay.ACTION_MINIMIZE"
     const val ACTION_RESTORE = "com.signo38.codiApp.overlay.ACTION_RESTORE"
+    /** Broadcast local (setPackage) tras actualizar JSON del pull en SharedPreferences. */
+    const val ACTION_PULL_UPDATED = "com.signo38.codiApp.overlay.PULL_UPDATED"
 
     private const val NOTIFICATION_ID = 1001
     private const val CHANNEL_ID = "codi_overlay"
@@ -64,6 +73,10 @@ class OverlayService : Service() {
     private const val MAX_PANEL_SCALE = 5f
     /** Ancho base del panel en dp (escala 1). */
     private const val PANEL_BASE_WIDTH_DP = 300f
+
+    private const val OVERLAY_PREFS_NAME = "codi_overlay"
+    private const val PREF_SCANNER_PASSTHROUGH_TO_SAP = "scanner_passthrough_to_sap"
+    private const val PREF_PULL_SNAPSHOT_JSON = "pull_snapshot_json"
   }
 
   private var windowManager: WindowManager? = null
@@ -85,6 +98,23 @@ class OverlayService : Service() {
   private var barcodeView: ImageView? = null
   private var generatedValueView: TextView? = null
   private var generatedLabelView: TextView? = null
+  private var scannerPassthroughSwitch: Switch? = null
+
+  private var pullSection: LinearLayout? = null
+  private var pullContent: LinearLayout? = null
+  private var pullUpdatedReceiverRegistered = false
+  private val pullUpdatedReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      val raw = locationField?.text?.toString() ?: ""
+      updatePullContextForLocation(raw)
+    }
+  }
+
+  /**
+   * Si es true, la ventana overlay no recibe teclas del pistole/teclado físico (FLAG_NOT_FOCUSABLE);
+   * el sistema las entrega a la ventana enfocada detrás (p. ej. SAP).
+   */
+  private var scannerPassthroughToSap = true
 
   private var keyboardLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
 
@@ -190,6 +220,233 @@ class OverlayService : Service() {
     startForeground(NOTIFICATION_ID, notif)
   }
 
+  private fun baseOverlayLayoutFlags(): Int {
+    return WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+      WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+  }
+
+  private fun overlayFlagsForPassthroughState(): Int {
+    return baseOverlayLayoutFlags() or
+      if (scannerPassthroughToSap) WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE else 0
+  }
+
+  private fun applyScannerPassthroughWindowFlags() {
+    val p = params ?: return
+    p.flags = overlayFlagsForPassthroughState()
+    val host = pinchHost ?: return
+    val wm = windowManager ?: return
+    if (scannerPassthroughToSap) {
+      locationField?.clearFocus()
+      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+      val token = overlayView?.windowToken
+      if (imm != null && token != null) {
+        imm.hideSoftInputFromWindow(token, 0)
+      }
+    }
+    try {
+      wm.updateViewLayout(host, p)
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun overlayPrefs(): SharedPreferences {
+    return getSharedPreferences(OVERLAY_PREFS_NAME, Context.MODE_PRIVATE)
+  }
+
+  private fun readScannerPassthroughPref(): Boolean {
+    return overlayPrefs().getBoolean(PREF_SCANNER_PASSTHROUGH_TO_SAP, true)
+  }
+
+  private fun persistScannerPassthroughPref(value: Boolean) {
+    overlayPrefs().edit().putBoolean(PREF_SCANNER_PASSTHROUGH_TO_SAP, value).apply()
+  }
+
+  private fun readPullSnapshotJson(): String? {
+    return overlayPrefs().getString(PREF_PULL_SNAPSHOT_JSON, null)?.takeIf { it.isNotBlank() }
+  }
+
+  private fun registerPullUpdatedReceiver() {
+    if (pullUpdatedReceiverRegistered) return
+    try {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        registerReceiver(pullUpdatedReceiver, IntentFilter(ACTION_PULL_UPDATED), Context.RECEIVER_NOT_EXPORTED)
+      } else {
+        @Suppress("DEPRECATION")
+        registerReceiver(pullUpdatedReceiver, IntentFilter(ACTION_PULL_UPDATED))
+      }
+      pullUpdatedReceiverRegistered = true
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun unregisterPullUpdatedReceiver() {
+    if (!pullUpdatedReceiverRegistered) return
+    try {
+      unregisterReceiver(pullUpdatedReceiver)
+    } catch (_: Throwable) {
+    }
+    pullUpdatedReceiverRegistered = false
+  }
+
+  private fun hidePullContextSection() {
+    pullSection?.visibility = View.GONE
+    pullContent?.removeAllViews()
+  }
+
+  private fun normalizeVoiceToLocationPull(transcript: String): String {
+    var t = transcript.trim().lowercase(Locale.ROOT)
+    t = t.replace(Regex("\\b(guión|guion)\\b", RegexOption.IGNORE_CASE), "-")
+    t = t.replace(Regex("\\braya\\b", RegexOption.IGNORE_CASE), "-")
+    t = t.replace(Regex("\\s+"), "")
+    t = t.replace(Regex("-+"), "-")
+    return t.uppercase(Locale.ROOT)
+  }
+
+  private fun locationMatchKeyPull(raw: String): String {
+    val t = raw.trim().uppercase(Locale.ROOT)
+    if (t.isEmpty()) return ""
+    return normalizeVoiceToLocationPull(t).replace("-", "")
+  }
+
+  private fun scanToLocationKeyPull(input: String): String {
+    var s = input.trim()
+    if (s.isEmpty()) return ""
+    val upper = s.uppercase(Locale.ROOT)
+    val prefix = "MX1 002 "
+    if (upper.startsWith(prefix)) {
+      s = s.substring(prefix.length).trim()
+    } else {
+      val re = Regex("^MX1\\s+002\\s+", RegexOption.IGNORE_CASE)
+      if (re.containsMatchIn(s)) {
+        s = s.replaceFirst(re, "").trim()
+      }
+    }
+    return locationMatchKeyPull(s)
+  }
+
+  private fun addPullLabel(parent: LinearLayout, text: String, textSizeSp: Float, color: Int) {
+    val tv = TextView(this)
+    tv.text = text
+    tv.setTextColor(color)
+    tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, textSizeSp)
+    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+    lp.bottomMargin = dp(4)
+    tv.layoutParams = lp
+    parent.addView(tv)
+  }
+
+  private fun pullBarcodeTargetWidth(): Int {
+    val rw = overlayRoot?.width ?: 0
+    return if (rw > 0) max(120, rw - dp(24)) else max(120, dp(260))
+  }
+
+  private fun addPullBarcode(parent: LinearLayout, value: String) {
+    val v = value.trim()
+    if (v.isEmpty()) return
+    try {
+      val w = pullBarcodeTargetWidth()
+      val h = max(36, (90f * panelScale).toInt().coerceAtMost(200))
+      val bmp = generateCode128(v, w, h)
+      val iv = ImageView(this)
+      iv.setImageBitmap(bmp)
+      iv.adjustViewBounds = true
+      iv.scaleType = ImageView.ScaleType.FIT_CENTER
+      val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+      lp.bottomMargin = dp(8)
+      iv.layoutParams = lp
+      parent.addView(iv)
+      val mono = TextView(this)
+      mono.text = v
+      mono.setTextColor(Color.parseColor("#c8c8d0"))
+      mono.textSize = 10f
+      mono.gravity = Gravity.CENTER_HORIZONTAL
+      val lp2 = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+      lp2.bottomMargin = dp(10)
+      mono.layoutParams = lp2
+      parent.addView(mono)
+    } catch (_: Throwable) {
+    }
+  }
+
+  private fun updatePullContextForLocation(warehouseRaw: String) {
+    val section = pullSection ?: return
+    val content = pullContent ?: return
+    val trimmed = warehouseRaw.trim()
+    if (trimmed.isEmpty()) {
+      hidePullContextSection()
+      return
+    }
+    val jsonStr = readPullSnapshotJson()
+    if (jsonStr.isNullOrBlank()) {
+      hidePullContextSection()
+      return
+    }
+    try {
+      val root = JSONObject(jsonStr)
+      if (root.optInt("version") != 1) {
+        hidePullContextSection()
+        return
+      }
+      val locs = root.optJSONArray("locations") ?: run {
+        hidePullContextSection()
+        return
+      }
+      val matchKey = scanToLocationKeyPull(trimmed)
+      if (matchKey.isEmpty()) {
+        hidePullContextSection()
+        return
+      }
+      var matched: JSONObject? = null
+      for (i in 0 until locs.length()) {
+        val obj = locs.optJSONObject(i) ?: continue
+        if (obj.optString("matchKey", "") == matchKey) {
+          matched = obj
+          break
+        }
+      }
+      section.visibility = View.VISIBLE
+      content.removeAllViews()
+      if (matched == null) {
+        addPullLabel(content, "Sin coincidencias en pull para esta ubicación.", 12f, Color.parseColor("#c9a227"))
+        overlayView?.post { syncPanelLayoutAndWindow() }
+        return
+      }
+      val display = matched.optString("locationDisplay", trimmed).ifBlank { trimmed }
+      addPullLabel(content, "Ubicación: $display", 13f, Color.WHITE)
+      addPullLabel(content, "Código (ubicación)", 10f, Color.parseColor("#9a9aa3"))
+      val locBarcode = generatedValueView?.text?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "MX1 002 $trimmed"
+      addPullBarcode(content, locBarcode)
+
+      val dns = matched.optJSONArray("dns") ?: JSONArray()
+      for (j in 0 until dns.length()) {
+        val dnObj = dns.optJSONObject(j) ?: continue
+        val dnDisplay = dnObj.optString("dnDisplay", "").trim()
+        addPullLabel(
+          content,
+          "DN: " + if (dnDisplay.isEmpty()) "—" else dnDisplay,
+          12f,
+          Color.parseColor("#64d2ff"),
+        )
+        if (dnDisplay.isNotEmpty()) {
+          addPullLabel(content, "Código (DN)", 10f, Color.parseColor("#9a9aa3"))
+          addPullBarcode(content, "MX1 002 $dnDisplay")
+        }
+        val lines = dnObj.optJSONArray("lines") ?: JSONArray()
+        for (k in 0 until lines.length()) {
+          val line = lines.optJSONObject(k) ?: continue
+          val item = line.optString("item", "").trim()
+          val box = line.optString("box", "").trim()
+          addPullLabel(content, "Item: " + if (item.isEmpty()) "—" else item, 11f, Color.parseColor("#e4e4ea"))
+          addPullLabel(content, "Box: " + if (box.isEmpty()) "—" else box, 11f, Color.parseColor("#e4e4ea"))
+        }
+      }
+    } catch (_: Throwable) {
+      hidePullContextSection()
+      return
+    }
+    overlayView?.post { syncPanelLayoutAndWindow() }
+  }
+
   private fun dp(value: Int): Int {
     return TypedValue.applyDimension(
       TypedValue.COMPLEX_UNIT_DIP,
@@ -229,7 +486,8 @@ class OverlayService : Service() {
       rawHitsView(enterButton, ev) ||
       rawHitsView(clearButton, ev) ||
       rawHitsView(minimizeButton, ev) ||
-      rawHitsView(closeButton, ev)
+      rawHitsView(closeButton, ev) ||
+      rawHitsView(scannerPassthroughSwitch, ev)
   }
 
   private fun setTopMargin(v: View?, topDp: Float) {
@@ -458,6 +716,8 @@ class OverlayService : Service() {
     if (overlayView != null) return
     if (!Settings.canDrawOverlays(this)) return
 
+    scannerPassthroughToSap = readScannerPassthroughPref()
+
     windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
     val inflater = getSystemService(LAYOUT_INFLATER_SERVICE) as LayoutInflater
@@ -479,13 +739,26 @@ class OverlayService : Service() {
     barcodeView = view.findViewById(R.id.overlay_barcode)
     generatedValueView = view.findViewById(R.id.overlay_generated_value)
     generatedLabelView = view.findViewById(R.id.overlay_generated_label)
+    scannerPassthroughSwitch = view.findViewById(R.id.overlay_scanner_passthrough)
+    pullSection = view.findViewById(R.id.overlay_pull_section)
+    pullContent = view.findViewById(R.id.overlay_pull_content)
+    scannerPassthroughSwitch?.setOnCheckedChangeListener(null)
+    scannerPassthroughSwitch?.isChecked = scannerPassthroughToSap
+    scannerPassthroughSwitch?.setOnCheckedChangeListener { _, checked ->
+      scannerPassthroughToSap = checked
+      persistScannerPassthroughPref(checked)
+      applyScannerPassthroughWindowFlags()
+    }
 
     root.clipToOutline = true
     root.elevation = 12f
 
     fun generateFromLocation(raw: String) {
       val trimmed = raw.trim()
-      if (trimmed.isEmpty()) return
+      if (trimmed.isEmpty()) {
+        this@OverlayService.hidePullContextSection()
+        return
+      }
       val finalText = "MX1 002 $trimmed"
       generatedLabelView?.visibility = View.VISIBLE
       generatedValueView?.text = finalText
@@ -493,6 +766,7 @@ class OverlayService : Service() {
       val bh = max(48, (220f * panelScale).toInt().coerceAtMost(900))
       val bmp = generateCode128(finalText, bw, bh)
       barcodeView?.setImageBitmap(bmp)
+      this@OverlayService.updatePullContextForLocation(trimmed)
     }
 
     host.isInteractiveDragTarget = { ev -> rawHitsInteractive(ev) }
@@ -555,6 +829,7 @@ class OverlayService : Service() {
       generatedValueView?.text = ""
       barcodeView?.setImageBitmap(null)
       generatedLabelView?.visibility = View.INVISIBLE
+      hidePullContextSection()
     }
 
     host.onPinchScale = { factor ->
@@ -603,8 +878,7 @@ class OverlayService : Service() {
       WindowManager.LayoutParams.WRAP_CONTENT,
       WindowManager.LayoutParams.WRAP_CONTENT,
       layoutType,
-      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+      overlayFlagsForPassthroughState(),
       PixelFormat.TRANSLUCENT,
     ).apply {
       gravity = Gravity.TOP or Gravity.START
@@ -626,6 +900,7 @@ class OverlayService : Service() {
       syncPanelLayoutAndWindow()
       applyKeyboardAndScroll()
     }
+    registerPullUpdatedReceiver()
   }
 
   private fun scrollFocusedInputIntoView() {
@@ -754,6 +1029,9 @@ class OverlayService : Service() {
   }
 
   private fun hideOverlay() {
+    unregisterPullUpdatedReceiver()
+    hidePullContextSection()
+
     keyboardLayoutListener?.let { listener ->
       try {
         overlayView?.viewTreeObserver?.removeOnGlobalLayoutListener(listener)
@@ -797,6 +1075,9 @@ class OverlayService : Service() {
     barcodeView = null
     generatedValueView = null
     generatedLabelView = null
+    scannerPassthroughSwitch = null
+    pullSection = null
+    pullContent = null
     isMinimized = false
   }
 

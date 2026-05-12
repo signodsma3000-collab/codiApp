@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppState,
@@ -13,13 +14,22 @@ import {
 
 import { CodiPanel } from '@/components/CodiPanel';
 import { getCodiOverlay } from '@/lib/codiOverlayNative';
+import { ensurePullSyncedToNative } from '@/lib/pullStorage';
 
 export default function HomeScreen() {
   const title = useMemo(() => 'CODI APP', []);
   const overlay = useMemo(() => getCodiOverlay(), []);
+  const router = useRouter();
 
   const pendingAutoShow = useRef(false);
   const [overlayHint, setOverlayHint] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android') {
+      return;
+    }
+    void ensurePullSyncedToNative();
+  }, []);
 
   useEffect(() => {
     if (!overlay) {
@@ -28,6 +38,9 @@ export default function HomeScreen() {
     const sub = AppState.addEventListener('change', async (next) => {
       if (next !== 'active') {
         return;
+      }
+      if (Platform.OS === 'android') {
+        void ensurePullSyncedToNative();
       }
       try {
         const can = await overlay.canDrawOverlays();
@@ -88,6 +101,19 @@ export default function HomeScreen() {
           <View style={styles.centered}>
             <CodiPanel title={title} />
 
+            <View style={styles.pullSection}>
+              <Pressable
+                style={({ pressed }) => [styles.pullLink, pressed && styles.overlayButtonPressed]}
+                accessibilityRole="button"
+                accessibilityLabel="Abrir hoja de pull"
+                onPress={() => {
+                  // Route app/pull.tsx — si typedRoutes no lo incluye aún, forzar navegación.
+                  (router.push as (href: string) => void)('/pull');
+                }}>
+                <Text style={styles.pullLinkLabel}>Hoja de pull</Text>
+              </Pressable>
+            </View>
+
             {Platform.OS === 'android' && overlay ? (
               <View style={styles.overlaySection}>
                 <Pressable
@@ -135,10 +161,29 @@ const styles = StyleSheet.create({
     maxWidth: 400,
     alignSelf: 'center',
   },
+  pullSection: {
+    width: '100%',
+    marginTop: 20,
+  },
   overlaySection: {
     width: '100%',
     marginTop: 20,
     gap: 10,
+  },
+  pullLink: {
+    width: '100%',
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: '#ffffff',
+    backgroundColor: '#ffffff10',
+  },
+  pullLinkLabel: {
+    color: '#ffffff',
+    fontSize: 15,
+    fontWeight: '600',
   },
   overlayButton: {
     width: '100%',

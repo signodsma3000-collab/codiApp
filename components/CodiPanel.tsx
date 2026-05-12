@@ -18,13 +18,8 @@ import {
 
 import type { SpeechWebBridgeHandle } from '@/components/SpeechWebBridge';
 import { SpeechWebBridge } from '@/components/SpeechWebBridge';
+import { buildBarcodeValue } from '@/lib/codiBarcode';
 import { normalizeVoiceToLocation } from '@/lib/normalizeVoiceLocation';
-
-const BARCODE_PREFIX = 'MX1 002';
-
-function buildBarcodeValue(rawInput: string): string {
-  return `${BARCODE_PREFIX} ${rawInput.trim()}`;
-}
 
 async function ensureMicrophoneAccess(): Promise<boolean> {
   if (Platform.OS === 'web') {
